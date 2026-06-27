@@ -366,14 +366,30 @@ async function initOCR() {
         if (typeof Tesseract === 'undefined') {
             throw new Error('Tesseract.js script did not load — check network/CDN access.');
         }
+
+        setStatus('Downloading OCR engine…', 'warn', '⏳');
+
+        // Explicit absolute CDN paths — required in Capacitor WebView because
+        // relative paths derived from the script tag break inside capacitor://localhost
         worker = await Tesseract.createWorker('eng', 1, {
-            logger: () => {},
-            errorHandler: (err) => console.error('Tesseract worker error:', err),
+            workerPath: 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/worker.min.js',
+            langPath:   'https://tessdata.projectnaptha.com/4.0.0',
+            corePath:   'https://unpkg.com/tesseract.js-core@4.0.3/tesseract-core.wasm.js',
+            logger: (m) => {
+                if (!m.status) return;
+                const pct = Math.round((m.progress || 0) * 100);
+                if (m.status.includes('loading') || m.status.includes('initializing'))
+                    setStatus('OCR loading… ' + pct + '%', 'warn', '⏳');
+                console.log('[Tesseract]', m.status, pct + '%');
+            },
+            errorHandler: (err) => console.error('Tesseract internal error:', err),
         });
+
         await worker.setParameters({
             tessedit_char_whitelist: '0123456789',
-            tessedit_pageseg_mode: '6', // uniform block — handles uneven handwriting spacing
+            tessedit_pageseg_mode: '6',
         });
+
         ocrReady = true;
         setStatus('Ready — scanning for 8-digit numbers', 'ready', '🟢');
         scanLine.classList.add('active');
