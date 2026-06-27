@@ -157,6 +157,36 @@
         .last-detected .count-info { text-align: right; }
         .last-detected .total-count { font-size: 28px; font-weight: 800; color: #ffffff; }
 
+        /* Capture button */
+        .btn-capture {
+            width: 100%;
+            padding: 20px;
+            font-size: 20px; font-weight: 800;
+            background: linear-gradient(135deg, #00897b, #0097a7);
+            color: #fff;
+            border: none; border-radius: 14px;
+            cursor: pointer;
+            letter-spacing: 1px;
+            transition: transform 0.15s, opacity 0.2s;
+            display: flex; align-items: center; justify-content: center; gap: 10px;
+        }
+        .btn-capture:not(:disabled):active { transform: scale(0.96); }
+        .btn-capture:disabled {
+            background: #1e2230;
+            color: #37474f;
+            cursor: not-allowed;
+        }
+
+        /* Camera flash overlay */
+        .flash {
+            position: absolute; inset: 0;
+            background: #fff;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.08s;
+        }
+        .flash.on { opacity: 0.75; }
+
         /* Buttons */
         .btn-row { display: flex; gap: 10px; }
         .btn {
@@ -252,6 +282,7 @@
     <div class="camera-card">
         <div class="video-wrapper">
             <video id="webcam" autoplay playsinline muted></video>
+            <div class="flash" id="flash"></div>
             <div class="overlay">
                 <div class="mask-top"></div>
                 <div class="mask-bottom"></div>
@@ -263,6 +294,10 @@
             </div>
         </div>
     </div>
+
+    <button class="btn-capture" id="capture-btn" onclick="captureAndRead()" disabled>
+        📸 Capture &amp; Read Number
+    </button>
 
     <div class="status-pill ready" id="status-pill">
         <span class="status-icon">📷</span>
@@ -326,6 +361,8 @@ const totalCount   = document.getElementById('total-count');
 const logBody      = document.getElementById('log-body');
 const counter      = document.getElementById('counter');
 const scanLine     = document.getElementById('scan-line');
+const captureBtn   = document.getElementById('capture-btn');
+const flashEl      = document.getElementById('flash');
 
 let dataset = [];
 let busy = false;
@@ -391,9 +428,9 @@ async function initOCR() {
         });
 
         ocrReady = true;
-        setStatus('Ready — scanning for 8-digit numbers', 'ready', '🟢');
+        captureBtn.disabled = false;
         scanLine.classList.add('active');
-        setInterval(doScan, 1000);
+        setStatus('Ready — press Capture to read a number', 'ready', '🟢');
     } catch(e) {
         const msg = e instanceof Error
             ? e.message
@@ -420,65 +457,81 @@ async function initCamera() {
     }
 }
 
-// ─── Scan Frame ────────────────────────────────────
-async function doScan() {
+// ─── Capture & Read ────────────────────────────────
+async function captureAndRead() {
     if (busy || !ocrReady || webcam.videoWidth === 0) return;
     busy = true;
+    captureBtn.disabled = true;
+    captureBtn.textContent = '⏳ Reading…';
 
-    const ctx = canvas.getContext('2d');
-    const vW = webcam.videoWidth;
-    const vH = webcam.videoHeight;
+    // Camera flash effect
+    flashEl.classList.add('on');
+    setTimeout(() => flashEl.classList.remove('on'), 150);
 
-    // Crop scan zone
-    const sx = vW * 0.08, sy = vH * 0.30;
-    const sw = vW * 0.84, sh = vH * 0.32;
-
-    // Upscale 3× — more pixels = better handwriting recognition
-    const scale = 3;
-    canvas.width  = sw * scale;
-    canvas.height = sh * scale;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(webcam, sx, sy, sw, sh, 0, 0, sw * scale, sh * scale);
-
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = imgData.data;
-    const pixelCount = canvas.width * canvas.height;
-
-    // Convert to grayscale
-    const gray = new Uint8Array(pixelCount);
-    for (let i = 0; i < d.length; i += 4) {
-        gray[i >> 2] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    }
-
-    // Otsu's adaptive threshold — automatically adapts to handwriting contrast
-    const thresh = computeOtsuThreshold(gray);
-
-    // Binarize: dark ink → black (0), paper → white (255)
-    for (let i = 0; i < d.length; i += 4) {
-        const v = gray[i >> 2] < thresh ? 0 : 255;
-        d[i] = d[i + 1] = d[i + 2] = v;
-        d[i + 3] = 255;
-    }
-    ctx.putImageData(imgData, 0, 0);
+    setStatus('Processing image…', 'warn', '⏳');
 
     try {
+        const ctx = canvas.getContext('2d');
+        const vW = webcam.videoWidth;
+        const vH = webcam.videoHeight;
+
+        // Capture full frame first, then crop scan zone
+        const sx = vW * 0.08, sy = vH * 0.25;
+        const sw = vW * 0.84, sh = vH * 0.40;
+
+        // Upscale 3× for better handwriting recognition
+        const scale = 3;
+        canvas.width  = sw * scale;
+        canvas.height = sh * scale;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(webcam, sx, sy, sw, sh, 0, 0, sw * scale, sh * scale);
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = imgData.data;
+
+        // Grayscale
+        const gray = new Uint8Array(canvas.width * canvas.height);
+        for (let i = 0; i < d.length; i += 4) {
+            gray[i >> 2] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        }
+
+        // Otsu's adaptive threshold — adapts to handwriting ink contrast
+        const thresh = computeOtsuThreshold(gray);
+
+        // Binarize: dark ink → black, paper → white
+        for (let i = 0; i < d.length; i += 4) {
+            const v = gray[i >> 2] < thresh ? 0 : 255;
+            d[i] = d[i + 1] = d[i + 2] = v;
+            d[i + 3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+
         const { data: { text } } = await worker.recognize(canvas);
-        const clean = text.replace(/\D/g, ''); // strip everything except digits
+        const clean = text.replace(/\D/g, '');
         const match = clean.match(/\d{8}/);
 
         if (match) {
             const num = match[0];
             if (!dataset.some(r => r.num === num)) {
                 addRecord(num);
-                setStatus(`✅ Captured: ${num}`, 'success', '✅');
-                setTimeout(() => setStatus('Ready — scanning for 8-digit numbers', 'ready', '🟢'), 2000);
+                setStatus('✅ Captured: ' + num, 'success', '✅');
+            } else {
+                setStatus('Already scanned: ' + num, 'warn', '⚠️');
             }
+        } else {
+            setStatus('No 8-digit number found — try again', 'warn', '🔄');
         }
     } catch(e) {
-        console.warn('OCR error:', e);
+        console.error('OCR error:', e);
+        setStatus('Read failed — try again', 'error', '❌');
     }
+
     busy = false;
+    captureBtn.disabled = false;
+    captureBtn.innerHTML = '📸 Capture &amp; Read Number';
+
+    setTimeout(() => setStatus('Ready — press Capture to read a number', 'ready', '🟢'), 2500);
 }
 
 // ─── Add Record ────────────────────────────────────
