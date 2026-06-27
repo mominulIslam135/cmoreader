@@ -339,6 +339,27 @@ function setStatus(msg, type='ready', icon='📷') {
     statusPill.querySelector('.status-icon').textContent = icon;
 }
 
+// ─── Otsu's Adaptive Threshold ─────────────────────
+function computeOtsuThreshold(gray) {
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+    const total = gray.length;
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, maxVar = 0, threshold = 128;
+    for (let t = 0; t < 256; t++) {
+        wB += hist[t];
+        if (!wB) continue;
+        const wF = total - wB;
+        if (!wF) break;
+        sumB += t * hist[t];
+        const mB = sumB / wB, mF = (sum - sumB) / wF;
+        const v = wB * wF * (mB - mF) ** 2;
+        if (v > maxVar) { maxVar = v; threshold = t; }
+    }
+    return threshold;
+}
+
 // ─── Init OCR Worker ───────────────────────────────
 async function initOCR() {
     try {
@@ -351,7 +372,7 @@ async function initOCR() {
         });
         await worker.setParameters({
             tessedit_char_whitelist: '0123456789',
-            tessedit_pageseg_mode: '7',
+            tessedit_pageseg_mode: '6', // uniform block — handles uneven handwriting spacing
         });
         ocrReady = true;
         setStatus('Ready — scanning for 8-digit numbers', 'ready', '🟢');
@@ -391,39 +412,48 @@ async function doScan() {
     const ctx = canvas.getContext('2d');
     const vW = webcam.videoWidth;
     const vH = webcam.videoHeight;
-    canvas.width  = vW;
-    canvas.height = vH;
 
-    // Crop the scan zone (matches CSS: top 30%, left 8%, width 84%, height 32%)
+    // Crop scan zone
     const sx = vW * 0.08, sy = vH * 0.30;
     const sw = vW * 0.84, sh = vH * 0.32;
 
-    // Draw cropped area
-    canvas.width = sw; canvas.height = sh;
-    ctx.drawImage(webcam, sx, sy, sw, sh, 0, 0, sw, sh);
+    // Upscale 3× — more pixels = better handwriting recognition
+    const scale = 3;
+    canvas.width  = sw * scale;
+    canvas.height = sh * scale;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(webcam, sx, sy, sw, sh, 0, 0, sw * scale, sh * scale);
 
-    // Preprocess: grayscale + contrast boost + binarize
-    const imgData = ctx.getImageData(0, 0, sw, sh);
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const d = imgData.data;
+    const pixelCount = canvas.width * canvas.height;
+
+    // Convert to grayscale
+    const gray = new Uint8Array(pixelCount);
     for (let i = 0; i < d.length; i += 4) {
-        // Grayscale
-        let g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-        // Contrast stretch
-        g = Math.min(255, Math.max(0, (g - 100) * 1.8 + 100));
-        // Otsu-like threshold at 128
-        const v = g < 128 ? 0 : 255;
-        d[i] = d[i+1] = d[i+2] = v;
+        gray[i >> 2] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+
+    // Otsu's adaptive threshold — automatically adapts to handwriting contrast
+    const thresh = computeOtsuThreshold(gray);
+
+    // Binarize: dark ink → black (0), paper → white (255)
+    for (let i = 0; i < d.length; i += 4) {
+        const v = gray[i >> 2] < thresh ? 0 : 255;
+        d[i] = d[i + 1] = d[i + 2] = v;
+        d[i + 3] = 255;
     }
     ctx.putImageData(imgData, 0, 0);
 
     try {
         const { data: { text } } = await worker.recognize(canvas);
-        const clean = text.replace(/\s+/g, '');
+        const clean = text.replace(/\D/g, ''); // strip everything except digits
         const match = clean.match(/\d{8}/);
 
         if (match) {
             const num = match[0];
-            if (!dataset.includes(num)) {
+            if (!dataset.some(r => r.num === num)) {
                 addRecord(num);
                 setStatus(`✅ Captured: ${num}`, 'success', '✅');
                 setTimeout(() => setStatus('Ready — scanning for 8-digit numbers', 'ready', '🟢'), 2000);
