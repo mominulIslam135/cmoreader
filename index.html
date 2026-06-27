@@ -342,19 +342,27 @@ function setStatus(msg, type='ready', icon='📷') {
 // ─── Init OCR Worker ───────────────────────────────
 async function initOCR() {
     try {
+        if (typeof Tesseract === 'undefined') {
+            throw new Error('Tesseract.js script did not load — check network/CDN access.');
+        }
         worker = await Tesseract.createWorker('eng', 1, {
-            logger: () => {}
+            logger: () => {},
+            errorHandler: (err) => console.error('Tesseract worker error:', err),
         });
         await worker.setParameters({
             tessedit_char_whitelist: '0123456789',
-            tessedit_pageseg_mode: '7', // treat image as single line
+            tessedit_pageseg_mode: '7',
         });
         ocrReady = true;
         setStatus('Ready — scanning for 8-digit numbers', 'ready', '🟢');
         scanLine.classList.add('active');
         setInterval(doScan, 1000);
     } catch(e) {
-        setStatus('OCR init failed: ' + e.message, 'error', '❌');
+        const msg = e instanceof Error
+            ? e.message
+            : (typeof e === 'string' ? e : JSON.stringify(e));
+        console.error('OCR init failed:', e);
+        setStatus('OCR init failed: ' + (msg || 'unknown error'), 'error', '❌');
     }
 }
 
